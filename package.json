@@ -1,6 +1,6 @@
 {
   "name": "postcss-token-utilities",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Token-driven utility CSS generator for PostCSS with JIT-style injection.",
   "author": "Aplance Tech <tech.aplance@gmail.com>",
   "contributors": [

@@ -811,6 +811,10 @@ MIT
 - [npm](https://www.npmjs.com/package/postcss-token-utilities)
 - [GitHub](https://github.com/aplance-tech/postcss-token-utilities)
 
+## In Production
+
+Powering the utility CSS layer of [Aplance UI](https://ui.aplance.com) — a live design system.
+
 ## Support
 
 If you find this plugin helpful, consider buying me a coffee! ☕

@@ -583,6 +583,26 @@ These are automatically converted to variants like `sm:`, `md:`, `dark:`, `motio
 }
 ```
 
+#### Cascade order (responsive variants just work)
+
+Utilities are emitted in a deterministic cascade order, independent of the order
+classes happen to appear in your files:
+
+1. **Base** utilities first, then **state** variants (pseudo / ancestor), then **media** variants - so a variant always wins over the base it overrides.
+2. **Media (responsive)** variants are ordered automatically so the **narrowest matching breakpoint wins** when several apply at once. This is breakpoint-direction aware, so it is correct for both **max-width** (desktop-first) and **min-width** (mobile-first) tokens - no per-project configuration.
+
+So these behave exactly as expected, with no manual ordering:
+
+```html
+<!-- 3 cols, then 1 col at <=1200px -->
+<div class="grid grid-cols-3 lg:grid-cols-1">...</div>
+
+<!-- 4 cols, then 2 at <=1200px, then 1 at <=550px -->
+<div class="grid grid-cols-4 lg:grid-cols-2 sm:grid-cols-1">...</div>
+```
+
+> Variants have the same specificity as base utilities, so this ordering is what makes them win. If you also need utilities to beat other stylesheets, place the injected `@layer utilities-gen` after those layers (see Recommended CSS Structure).
+
 ### iii. Ancestor Variants (Pre-added)
 
 Apply utilities based on parent or sibling element states. Perfect for hover effects on children or sibling-based interactions.

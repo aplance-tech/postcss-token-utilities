@@ -25,6 +25,29 @@ const CUSTOM_MEDIA_REGEX = /@custom-media\s+--([a-z0-9-]+)\s+\(([^)]+)\)/g;
 const QUOTED_STRING_REGEX = /["'`]([^"'`]+)["'`]/g;
 const VALID_CLASS_REGEX = /^[a-zA-Z0-9_:.-]+$/;
 const WHITESPACE_SPLIT_REGEX = /\s+/;
+// A numeric length (px / em / rem) - the units real width breakpoints use. The
+// raw number is compared directly, which is correct as long as a project uses a
+// consistent unit for its breakpoints (the normal case); units are not converted.
+const WIDTH_LENGTH_REGEX = /(\d+(?:\.\d+)?)\s*(?:px|r?em)\b/;
+const MIN_WIDTH_REGEX = /min-width|>=|>/;
+
+// Approximate the viewport-width range a media condition covers, used to order
+// responsive variants so the cascade is correct WITHOUT per-project config:
+// emit the widest range first and the narrowest (most specific) last, so when
+// several breakpoints match at once the narrowest one wins.
+//   - max-width X  -> covers ~0..X        -> range = X
+//   - min-width X  -> covers ~X..infinity -> range = MAX - X  (always widest)
+// This makes desktop-first (max-width) sort largest->smallest and mobile-first
+// (min-width) sort smallest->largest, both correct. Conditions with no length
+// width (e.g. `prefers-color-scheme`, `orientation`) return MAX so they sort
+// ahead of width breakpoints and keep their definition order via a stable sort.
+function mediaRange(condition: string): number {
+  const match = condition.match(WIDTH_LENGTH_REGEX);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  const value = parseFloat(match[1]);
+  if (MIN_WIDTH_REGEX.test(condition)) return Number.MAX_SAFE_INTEGER - value;
+  return value;
+}
 
 // Types
 export type DesignTokens = Record<string, Record<string, string>>;
@@ -89,6 +112,9 @@ let universeCache: {
   configHash: string;
   cssMap: Map<string, string>;
   rawCss: string;
+  // class name -> position in the canonical cascade order, used to sort the
+  // injected utilities deterministically (see UtilityGenerator.build).
+  rank: Map<string, number>;
 } | null = null;
 
 // The File Scan Cache: Stores mtime and classes per file
@@ -243,19 +269,38 @@ class UtilityGenerator {
     }
   }
 
+  // Variants in CASCADE order (later wins). State variants (pseudo + ancestor)
+  // keep their definition order; media variants are sorted widest-range-first so
+  // the narrowest/most-specific breakpoint is emitted last and wins when several
+  // match at once. This is what makes responsive utilities deterministic instead
+  // of dependent on definition / discovery order.
+  private orderedVariants(): VariantRule[] {
+    const states: VariantRule[] = [];
+    const media: MediaVariantRule[] = [];
+    for (const v of this.rules.variant) {
+      if (v.type === "media") media.push(v);
+      else states.push(v);
+    }
+    const decorated = media.map((v, i) => ({
+      v,
+      i,
+      range: mediaRange(v.condition),
+    }));
+    // Widest range first, narrowest last; stable on ties (preserve definition order).
+    decorated.sort((a, b) => b.range - a.range || a.i - b.i);
+    return [...states, ...decorated.map((d) => d.v)];
+  }
+
   build(opts: { collectRaw: boolean }) {
     const map = new Map<string, string>();
-    const raw: string[] = [];
-    const variants = this.rules.variant;
+    const baseClasses: string[] = [];
+    const variants = this.orderedVariants();
     const collectRaw = opts.collectRaw;
 
     const add = (cls: string, css: string) => {
-      // Base
-      const base = `.${cls} { ${css} }`;
-      map.set(cls, base);
-      if (collectRaw) raw.push(base);
+      map.set(cls, `.${cls} { ${css} }`);
+      baseClasses.push(cls);
 
-      // Variants
       for (let i = 0; i < variants.length; i++) {
         const v = variants[i];
         const escaped = `${v.name}\\:${cls}`;
@@ -270,10 +315,7 @@ class UtilityGenerator {
           vCss = `${v.selector} .${escaped} { ${css} }`;
         }
 
-        if (vCss) {
-          map.set(lookup, vCss);
-          if (collectRaw) raw.push(vCss);
-        }
+        if (vCss) map.set(lookup, vCss);
       }
     };
 
@@ -293,7 +335,26 @@ class UtilityGenerator {
       }
     }
 
-    return { map, raw };
+    // Canonical cascade order: EVERY base utility first (so a variant always
+    // wins over the base it overrides), then the variant utilities grouped by
+    // variant in `variants` order (states, then media narrowest-last). Both the
+    // injected stylesheet and the generated reference file follow this order, so
+    // the cascade no longer depends on the order classes happen to appear in the
+    // scanned files.
+    const order: string[] = baseClasses.slice();
+    for (let i = 0; i < variants.length; i++) {
+      const name = variants[i].name;
+      for (let j = 0; j < baseClasses.length; j++) {
+        const lookup = `${name}:${baseClasses[j]}`;
+        if (map.has(lookup)) order.push(lookup);
+      }
+    }
+
+    const rank = new Map<string, number>();
+    for (let i = 0; i < order.length; i++) rank.set(order[i], i);
+
+    const raw = collectRaw ? order.map((c) => map.get(c) as string) : [];
+    return { map, raw, rank };
   }
 }
 
@@ -444,9 +505,11 @@ const postcssTokenUtilities: PluginCreator<PluginOptions> = (
           tokens: tokenCss,
           media: mediaCss,
         });
-        const { map, raw } = gen.build({ collectRaw: shouldWriteGenerated });
+        const { map, raw, rank } = gen.build({
+          collectRaw: shouldWriteGenerated,
+        });
         const rawCss = shouldWriteGenerated ? raw.join("\n") : "";
-        universeCache = { configHash, cssMap: map, rawCss };
+        universeCache = { configHash, cssMap: map, rawCss, rank };
 
         // Write to disk (Only on Universe change & if option is there)
         if (shouldWriteGenerated) {
@@ -554,13 +617,21 @@ const postcssTokenUtilities: PluginCreator<PluginOptions> = (
         }
       }
 
+      // Emit the used utilities in canonical cascade order (base before its
+      // variants, breakpoints narrowest-last) rather than the order they happened
+      // to be discovered in source files - otherwise equal-specificity rules like
+      // `grid-cols-3` and `lg:grid-cols-1` would win by accident of scan order.
       const injectLines: string[] = [];
       const cssMap = universeCache?.cssMap;
-      if (cssMap) {
-        usedClasses.forEach((c) => {
+      const rank = universeCache?.rank;
+      if (cssMap && rank) {
+        const ordered = [...usedClasses].sort(
+          (a, b) => (rank.get(a) ?? 0) - (rank.get(b) ?? 0),
+        );
+        for (const c of ordered) {
           const css = cssMap.get(c);
           if (css) injectLines.push(css);
-        });
+        }
       }
 
       if (toRead.length > 0 && enableLogs)

@@ -123,6 +123,47 @@ const fileScanCache = new Map<
   { mtime: number; classes: Set<string> }
 >();
 
+// Process-global cap on concurrently-open file descriptors.
+//
+// PostCSS runs the `Once` hook once PER stylesheet, and bundlers (Vite/rolldown,
+// webpack) process many stylesheets in PARALLEL. Each invocation scans the whole
+// content glob, so an unbounded `Promise.all` over those files opens every one
+// at once - multiplied across every concurrent stylesheet. On a large app that's
+// thousands of simultaneous handles, which exhausts the OS limit and throws
+// `EMFILE: too many open files` (hit first on Windows, where the limit is lower).
+//
+// This semaphore bounds the TOTAL in-flight fs operations across ALL invocations
+// (module-level state is shared by the single plugin instance), so throughput is
+// still high but the descriptor count is safe regardless of repo size or build
+// parallelism. Dependency-free by design (this plugin stays lightweight).
+const FS_CONCURRENCY = 64;
+let fsActiveCount = 0;
+const fsWaiters: Array<() => void> = [];
+
+// Run `task` while holding one of the FS_CONCURRENCY slots. Uses token-transfer
+// (a finishing task hands its slot straight to the next waiter rather than
+// decrementing and letting the waiter re-increment), so the active count can
+// never transiently exceed the cap across microtask scheduling.
+const withFsSlot = async <T>(task: () => Promise<T>): Promise<T> => {
+  if (fsActiveCount < FS_CONCURRENCY) {
+    fsActiveCount++;
+  } else {
+    // At capacity: wait for a slot to be handed to us (count already accounts
+    // for it on hand-off, so we don't increment again).
+    await new Promise<void>((release) => fsWaiters.push(release));
+  }
+  try {
+    return await task();
+  } finally {
+    const next = fsWaiters.shift();
+    if (next) {
+      next(); // transfer this slot directly to the next waiter (count unchanged)
+    } else {
+      fsActiveCount--;
+    }
+  }
+};
+
 class ClassExtractor {
   private matcherRegex: RegExp;
 
@@ -582,10 +623,14 @@ const postcssTokenUtilities: PluginCreator<PluginOptions> = (
         }
       }
 
-      // Stat all files in parallel, then read only the ones that changed
+      // Stat all files (concurrency-bounded), then read only the ones that
+      // changed. The bound caps open descriptors so a large content glob across
+      // many parallel stylesheets can't exhaust the OS limit (EMFILE).
       const toRead: string[] = [];
       const statResults = await Promise.all(
-        files.map((f) => fs.promises.stat(f).then((s) => ({ f, s }))),
+        files.map((f) =>
+          withFsSlot(() => fs.promises.stat(f)).then((s) => ({ f, s })),
+        ),
       );
 
       for (const { f, s } of statResults) {
@@ -605,7 +650,7 @@ const postcssTokenUtilities: PluginCreator<PluginOptions> = (
 
       if (toRead.length > 0) {
         const contents = await Promise.all(
-          toRead.map((f) => fs.promises.readFile(f, "utf-8")),
+          toRead.map((f) => withFsSlot(() => fs.promises.readFile(f, "utf-8"))),
         );
         for (let i = 0; i < toRead.length; i++) {
           const f = toRead[i];

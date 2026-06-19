@@ -23,6 +23,31 @@ const staticBorderStyles = lineStyles.flatMap((style) => [
   { class: `border-l-${style}`, css: `border-left-style: ${style}` },
 ]);
 
+// Border widths - bare `border`, per-edge, and x/y shorthands. This plugin emits
+// no global `border-style: solid` reset (unlike Tailwind's preflight), so a
+// width-only utility sets a width but never paints. Each width utility therefore
+// also sets `solid` on its edge(s) so `border` / `border-t` render on their own
+// (the overwhelmingly common case). An explicit style class (`border-dashed`,
+// `border-t-none`, ...) still wins because the style statics are emitted AFTER
+// these (see the order in DEFAULT_STATIC_RULES). Width reads the --border-1
+// token (1px fallback) to match the .border-1 scale.
+const bw = "var(--border-1, 1px)";
+const staticBorderWidths = [
+  { class: "border", css: `border-width: ${bw}; border-style: solid` },
+  { class: "border-t", css: `border-top-width: ${bw}; border-top-style: solid` },
+  { class: "border-r", css: `border-right-width: ${bw}; border-right-style: solid` },
+  { class: "border-b", css: `border-bottom-width: ${bw}; border-bottom-style: solid` },
+  { class: "border-l", css: `border-left-width: ${bw}; border-left-style: solid` },
+  {
+    class: "border-x",
+    css: `border-left-width: ${bw}; border-right-width: ${bw}; border-left-style: solid; border-right-style: solid`,
+  },
+  {
+    class: "border-y",
+    css: `border-top-width: ${bw}; border-bottom-width: ${bw}; border-top-style: solid; border-bottom-style: solid`,
+  },
+];
+
 // Outline
 const staticOutlineStyles = lineStyles.map((style) => ({
   class: style === "none" ? "outline-none" : `outline-${style}`,
@@ -375,6 +400,8 @@ const DEFAULT_STATIC_RULES: StaticRule[] = [
   // Outline / Border
   ...staticOutlineOffsets,
   ...staticOutlineStyles,
+  // Widths BEFORE styles so an explicit style class (border-dashed, ...) wins.
+  ...staticBorderWidths,
   ...staticBorderStyles,
 
   // Auto margins & sizing

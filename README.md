@@ -437,6 +437,7 @@ A curated, Tailwind-like set covering:
 - Scroll behavior, Scroll snap (`snap-x`, `snap-y`, `snap-mandatory`, `snap-start`, …)
 - Opacity, Z-index (`z-0..50`), Visibility, Object fit/position, Aspect ratio (`aspect-square`, `aspect-video`, `aspect-auto`)
 - Outline/Border styles & offsets, Auto margins, Width/Height sizing keywords
+- Border widths: `border`, `border-t/r/b/l`, `border-x/y` (each sets a `var(--border-1)` 1px edge + `solid`, so it paints without a global `border-style` reset; override the style with `border-dashed`, `border-t-none`, etc.)
 
 ```javascript
   // e.g.
